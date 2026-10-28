@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>A股智能选股工作台</title>
+<link rel="stylesheet" href="/static/style.css" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">A</div>
+    <div class="brand-text">
+      <h1>A股智能选股工作台</h1>
+      <p>MULTI-FACTOR SCREENER · 实时行情</p>
+    </div>
+  </div>
+
+  <div class="index-strip" id="indexStrip">
+    <div class="index-skeleton"></div>
+  </div>
+
+  <div class="topbar-right">
+    <span class="src-badge" id="srcBadge">连接中…</span>
+    <button class="icon-btn" id="refreshBtn" title="刷新大盘数据">⟳</button>
+  </div>
+</header>
+
+<div class="layout">
+
+  <!-- ============ 左：筛选条件 ============ -->
+  <aside class="sidebar">
+    <section class="card">
+      <div class="card-head">
+        <h2>筛选条件</h2>
+        <span class="hint" id="universeHint">—</span>
+      </div>
+
+      <div class="preset-row">
+        <button class="preset" data-preset="balanced">均衡</button>
+        <button class="preset" data-preset="offense">进攻</button>
+        <button class="preset" data-preset="value">价值</button>
+        <button class="preset" data-preset="reset">重置</button>
+      </div>
+
+      <div class="field-grid">
+        <label class="field">
+          <span>成交额 ≥ (亿)</span>
+          <input type="number" id="f_min_amount" step="0.5" min="0" value="1" />
+        </label>
+        <label class="field">
+          <span>总市值 ≥ (亿)</span>
+          <input type="number" id="f_mv_min" step="10" min="0" value="30" />
+        </label>
+        <label class="field">
+          <span>涨跌幅 ≥ (%)</span>
+          <input type="number" id="f_pct_min" step="0.5" value="-9.9" />
+        </label>
+        <label class="field">
+          <span>涨跌幅 ≤ (%)</span>
+          <input type="number" id="f_pct_max" step="0.5" value="9.9" />
+        </label>
+        <label class="field">
+          <span>换手率 ≥ (%)</span>
+          <input type="number" id="f_to_min" step="0.1" min="0" value="0.3" />
+        </label>
+        <label class="field">
+          <span>换手率 ≤ (%)</span>
+          <input type="number" id="f_to_max" step="1" min="0" value="25" />
+        </label>
+        <label class="field">
+          <span>PE ≤ (0=不限)</span>
+          <input type="number" id="f_pe_max" step="5" min="0" value="0" />
+        </label>
+        <label class="field">
+          <span>PB ≤ (0=不限)</span>
+          <input type="number" id="f_pb_max" step="0.5" min="0" value="0" />
+        </label>
+        <label class="field">
+          <span>股价 ≥ (元)</span>
+          <input type="number" id="f_price_min" step="0.5" min="0" value="2" />
+        </label>
+        <label class="field">
+          <span>返回条数</span>
+          <input type="number" id="f_top_n" step="10" min="10" max="300" value="50" />
+        </label>
+      </div>
+
+      <label class="switch">
+        <input type="checkbox" id="f_exclude_st" checked />
+        <span>剔除 ST / *ST / 退市风险股</span>
+      </label>
+
+      <button class="primary-btn" id="runBtn">
+        <span class="btn-label">开始智能选股</span>
+        <span class="btn-spinner"></span>
+      </button>
+      <p class="foot-note" id="runNote">策略需拉取候选池日 K，首次约 5~10 秒</p>
+    </section>
+
+    <section class="card" id="sectorCard">
+      <div class="card-head"><h2>板块热度</h2></div>
+      <div class="sector-list" id="sectorList">
+        <div class="mini-skeleton"></div>
+      </div>
+    </section>
+  </aside>
+
+  <!-- ============ 右：结果 ============ -->
+  <main class="main">
+
+    <section class="card strategy-card">
+      <div class="card-head">
+        <h2>策略组合</h2>
+        <span class="hint">点击启用 / 停用，加权后计入总分</span>
+      </div>
+      <div class="strategy-grid" id="strategyGrid">
+        <div class="mini-skeleton"></div>
+      </div>
+    </section>
+
+    <section class="card result-card">
+      <div class="result-head">
+        <div class="result-title">
+          <h2>选股结果</h2>
+          <span class="meta-line" id="metaLine">尚未运行</span>
+        </div>
+        <div class="result-actions">
+          <div class="signal-summary" id="signalSummary"></div>
+          <button class="ghost-btn" id="exportBtn" disabled>导出 CSV</button>
+        </div>
+      </div>
+
+      <div class="table-wrap" id="tableWrap">
+        <div class="empty-state" id="emptyState">
+          <div class="empty-icon">⌁</div>
+          <h3>设置左侧条件，点「开始智能选股」</h3>
+          <p>全市场约 5200 只 A 股 · 多因子打分 + 6 组策略信号</p>
+        </div>
+        <table class="result-table" id="resultTable" hidden>
+          <thead>
+            <tr>
+              <th data-sort="rank" class="w-rank">#</th>
+              <th data-sort="name" class="w-name">名称 / 代码</th>
+              <th data-sort="price" class="num">现价</th>
+              <th data-sort="pct" class="num">涨跌幅</th>
+              <th data-sort="amount" class="num">成交额</th>
+              <th data-sort="turnover" class="num">换手</th>
+              <th data-sort="pe" class="num">PE</th>
+              <th data-sort="pb" class="num">PB</th>
+              <th data-sort="mv_yi" class="num">市值</th>
+              <th data-sort="score" class="num w-score">综合分</th>
+              <th class="w-signal">命中策略</th>
+            </tr>
+          </thead>
+          <tbody id="resultBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- ============ 个股详情抽屉 ============ -->
+<div class="drawer-mask" id="drawerMask" hidden></div>
+<aside class="drawer" id="drawer" hidden>
+  <div class="drawer-head">
+    <div>
+      <h3 id="drawerName">—</h3>
+      <p id="drawerMeta">—</p>
+    </div>
+    <button class="icon-btn" id="drawerClose">✕</button>
+  </div>
+
+  <div class="drawer-kpis" id="drawerKpis"></div>
+  <div class="chart-box" id="klineChart"></div>
+  <div class="drawer-body">
+    <h4>命中策略与理由</h4>
+    <div id="drawerSignals" class="signal-detail"></div>
+    <h4>因子拆解</h4>
+    <div id="drawerFactors" class="factor-bars"></div>
+  </div>
+</aside>
+
+<script src="/static/vendor/echarts.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
