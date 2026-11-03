@@ -62,7 +62,13 @@ def _http_get(url: str, timeout: int | None = None, tries: int | None = None,
     raise RuntimeError(f"请求失败: {url[:100]} -> {last}")
 
 
-def _cached(key: str, ttl: int, producer: Callable[[], Any], force: bool = False) -> Any:
+def _cached(key: str, ttl: int, producer: Callable[[], Any], force: bool = False,
+            max_stale: int = 0) -> Any:
+    """带缓存的取数。
+
+    producer 抛错时，若存在上一份成功数据且未超过 max_stale 秒，则降级返回并打 stale 标记；
+    超过则继续向上抛错，绝不用过期数据冒充实时数据。
+    """
     now = time.time()
     with _cache_lock:
         hit = _cache.get(key)
@@ -74,7 +80,7 @@ def _cached(key: str, ttl: int, producer: Callable[[], Any], force: bool = False
     except Exception:
         with _cache_lock:
             fallback = _last_good.get(key)
-        if fallback:
+        if fallback and (max_stale <= 0 or now - fallback[0] <= max_stale):
             _stale_keys.add(key)
             return fallback[1]
         raise
@@ -180,6 +186,12 @@ def _sina_normalize(item: dict) -> dict | None:
 
 
 def _snapshot_from_sina() -> list[dict]:
+    """拉取全市场快照。
+
+    完整性策略：**一页都不能少**。并发首轮失败不直接放行，
+    而是按 0.8s / 2s / 4s 的退避串行补最多 4 轮；仍缺页就抛错，
+    由上层退回上一份完整快照（stale-while-error），绝不让残缺数据静默通过。
+    """
     total = _sina_total()
     total_pages = min(SINA_MAX_PAGES, (total + SINA_PAGE_SIZE - 1) // SINA_PAGE_SIZE)
     pages = list(range(1, total_pages + 1))
@@ -202,12 +214,11 @@ def _snapshot_from_sina() -> list[dict]:
                 if norm:
                     rows.append(norm)
 
-    # 失败页串行补，最多两轮，避免并发被限流导致样本缺失
-    for round_no in range(2):
+    # 失败页串行补：并发被限流时降低压力，退避逐级加长
+    for round_no in range(4):
         if not missing:
             break
-        if round_no:
-            time.sleep(1.5)
+        time.sleep(0.8 * (2 ** round_no))
         for page in list(missing):
             try:
                 data = _sina_page(page, tries=3)
@@ -219,10 +230,16 @@ def _snapshot_from_sina() -> list[dict]:
                 if norm:
                     rows.append(norm)
 
+    _snapshot_meta.update(
+        pages_total=total_pages,
+        pages_ok=total_pages - len(missing),
+        pages_missing=list(missing),
+        upstream_total=total,
+    )
+    if missing:
+        raise RuntimeError(f"新浪快照缺 {len(missing)}/{total_pages} 页（{missing[:8]}），拒绝使用残缺数据")
     if not rows:
-        raise RuntimeError(f"新浪快照为空（缺失页 {missing[:5]}）")
-    if len(missing) > 3:
-        raise RuntimeError(f"新浪缺失 {len(missing)} 页，降级到备用源")
+        raise RuntimeError("新浪快照为空")
     return rows
 
 
@@ -245,8 +262,9 @@ def _snapshot_from_eastmoney() -> list[dict]:
     while page <= 60:
         try:
             diff = fetch_page(page)
-        except Exception:  # noqa: BLE001
-            break
+        except Exception as exc:  # noqa: BLE001
+            # 备用源同样不允许静默返回残缺数据
+            raise RuntimeError(f"东财快照第 {page} 页失败: {exc}") from exc
         if not diff:
             break
         for item in diff:
@@ -299,15 +317,26 @@ def get_snapshot(force: bool = False) -> list[dict]:
         except Exception as sina_err:  # noqa: BLE001
             try:
                 rows = _snapshot_from_eastmoney()
-                _snapshot_meta.update(source="eastmoney", fetched_at=time.time())
+                _snapshot_meta.update(
+                    source="eastmoney", fetched_at=time.time(),
+                    pages_total=0, pages_ok=0, pages_missing=[],
+                )
                 return rows
             except Exception as em_err:  # noqa: BLE001
                 raise RuntimeError(f"新浪失败({sina_err}); 东财失败({em_err})") from em_err
 
-    return _cached("snapshot", config.SNAPSHOT_TTL, build, force)
+    # 最多允许退回 5 分钟前的完整快照；更久则直接报错，避免用陈旧数据冒充实时
+    return _cached("snapshot", config.SNAPSHOT_TTL, build, force, max_stale=300)
 
 
-_snapshot_meta: dict[str, Any] = {"source": "sina", "fetched_at": None}
+_snapshot_meta: dict[str, Any] = {
+    "source": "sina",
+    "fetched_at": None,
+    "pages_total": 0,
+    "pages_ok": 0,
+    "pages_missing": [],
+    "upstream_total": 0,
+}
 
 
 def snapshot_source() -> str:
@@ -317,6 +346,21 @@ def snapshot_source() -> str:
 
 def snapshot_fetched_at() -> float | None:
     return _snapshot_meta.get("fetched_at")
+
+
+def snapshot_meta() -> dict:
+    """快照完整性信息：分页总数 / 成功数 / 缺失页。"""
+    with _cache_lock:
+        age = None
+        hit = _cache.get("snapshot")
+        if hit:
+            age = round(time.time() - hit[0], 1)
+    return {
+        **dict(_snapshot_meta),
+        "age_s": age,
+        "stale": is_stale("snapshot"),
+        "complete": not _snapshot_meta.get("pages_missing"),
+    }
 
 
 # ------------------------------------------------------------------ K 线
@@ -570,6 +614,7 @@ def health() -> dict:
             "latency_ms": int((time.time() - started) * 1000),
             "snapshot_age_s": cache_age("snapshot"),
             "stale": is_stale("snapshot"),
+            "snapshot": snapshot_meta(),
         }
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": str(exc)[:200]}
+        return {"ok": False, "error": str(exc)[:200], "snapshot": snapshot_meta()}

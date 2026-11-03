@@ -82,10 +82,18 @@ function renderIndexes(indexes) {
 function renderSource(overview) {
   const badge = $('#srcBadge');
   const age = overview.snapshot_age_s;
-  badge.className = 'src-badge ' + (overview.stale ? 'warn' : 'ok');
-  badge.textContent = overview.stale
-    ? `数据源降级 · ${age !== null ? age + 's' : ''}`
-    : `实时 · ${overview.breadth.total} 只 · ${age !== null ? age + 's 前' : '已连接'}`;
+  const snap = overview.snapshot || {};
+  const missing = (snap.pages_missing || []).length;
+  const pages = snap.pages_total ? `${snap.pages_ok}/${snap.pages_total} 页` : '';
+  badge.className = 'src-badge ' + (overview.stale || missing ? 'warn' : 'ok');
+  if (missing) {
+    badge.textContent = `快照缺 ${missing} 页 · 已用上次完整数据`;
+  } else {
+    badge.textContent = `实时 · ${overview.breadth.total} 只${pages ? ' · ' + pages : ''} · ${age !== null ? age + 's 前' : '已连接'}`;
+  }
+  badge.title = missing
+    ? `上游共 ${snap.pages_total || '?'} 页，缺失 ${missing} 页，已回退到上一份完整快照`
+    : `数据源 ${overview.source}｜快照 ${snap.pages_ok || 0}/${snap.pages_total || 0} 页完整`;
 }
 
 function renderBreadth(b) {

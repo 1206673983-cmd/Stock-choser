@@ -48,6 +48,7 @@ def market_overview() -> dict:
         "source": ds.snapshot_source(),
         "snapshot_age_s": ds.cache_age("snapshot"),
         "stale": ds.is_stale("snapshot"),
+        "snapshot": ds.snapshot_meta(),
     }
 
 
@@ -74,23 +75,30 @@ def screen(params: dict[str, Any] | None = None) -> dict:
     rows = _derive_all(snapshot)
     universe = factors.apply_filters(rows, filters)
 
-    # 需要 K 线的策略只对「成交额最大的 N 只」取数，避免打爆接口
+    # 需要 K 线的策略只对「成交额最大的 N 只」取数，避免打爆接口；
+    # 纯快照策略（如低估值优质）则对整个候选池执行，避免漏掉池外的票。
     active_keys = enabled if enabled is not None else list(strategies.REGISTRY.keys())
-    need_kline = any(
-        strategies.REGISTRY[k].need_kline for k in active_keys if k in strategies.REGISTRY
-    )
+    kline_keys = [k for k in active_keys
+                  if k in strategies.REGISTRY and strategies.REGISTRY[k].need_kline]
+    snapshot_keys = [k for k in active_keys
+                     if k in strategies.REGISTRY and not strategies.REGISTRY[k].need_kline]
+
     pool = sorted(universe, key=lambda r: -(r.get("amount") or 0))[: config.MAX_KLINE_FETCH]
     t1 = time.time()
 
     metrics_map: dict[str, dict] = {}
-    if need_kline and pool:
+    if kline_keys and pool:
         klines = ds.get_kline_batch([(r["code"], r["market"]) for r in pool])
         metrics_map = {
             code: factors.kline_metrics(kline) for code, kline in klines.items()
         }
     t2 = time.time()
 
-    hits = strategies.run_strategies(pool, metrics_map, active_keys)
+    hits: dict[str, list[dict]] = {}
+    if kline_keys:
+        hits.update(strategies.run_strategies(pool, metrics_map, kline_keys))
+    if snapshot_keys:
+        hits.update(strategies.run_strategies(universe, metrics_map, snapshot_keys))
     scored = scoring.score_rows(universe, hits)
     t3 = time.time()
 
@@ -113,6 +121,8 @@ def screen(params: dict[str, Any] | None = None) -> dict:
             "signals_hit": len(hits),
             "returned": len(top),
             "strategy_count": len(active_keys),
+            "kline_strategies": len(kline_keys),
+            "snapshot_strategies": len(snapshot_keys),
             "timings_ms": {
                 "snapshot": int((t1 - t0) * 1000),
                 "kline": int((t2 - t1) * 1000),
@@ -122,6 +132,7 @@ def screen(params: dict[str, Any] | None = None) -> dict:
             "source": ds.snapshot_source(),
             "stale": ds.is_stale("snapshot"),
             "snapshot_age_s": ds.cache_age("snapshot"),
+            "snapshot": ds.snapshot_meta(),
         },
         "filters": filters,
         "strategies": [

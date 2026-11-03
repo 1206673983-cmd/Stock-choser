@@ -64,8 +64,15 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"error": type(exc).__name__, "message": str(exc)[:400]}, status)
 
     def log_message(self, fmt: str, *args) -> None:  # 降噪：只打印 API 调用
-        if "/api/" in (args[0] if args else ""):
-            print(f"[{time.strftime('%H:%M:%S')}] {args[0]} -> {args[1]}")
+        # 注意：send_error 路径下 args[0] 可能是 HTTPStatus 枚举而非字符串，
+        # 直接做 `"x" in args[0]` 会抛 TypeError，必须先转成 str。
+        try:
+            target = str(args[0]) if args else ""
+            if "/api/" in target:
+                print(f"[{time.strftime('%H:%M:%S')}] {target} -> {args[1] if len(args) > 1 else ''}",
+                      flush=True)
+        except Exception:  # noqa: BLE001
+            pass
 
     # ---------------------------------------------------------- 路由
     def do_GET(self) -> None:  # noqa: N802

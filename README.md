@@ -3,6 +3,18 @@
 > 零依赖的本地 Web 选股工具：全市场实时快照 + 多因子打分 + 6 组技术策略信号 + 个股 K 线。
 > **不需要 pip install 任何东西**，Python 3.10+ 标准库直接跑。
 
+[![GitHub](https://img.shields.io/badge/repo-1206673983--cmd/Stock--choser-blue)](https://github.com/1206673983-cmd/Stock-choser)
+
+## 截图
+
+| 首屏概览 | 选股结果 |
+|---|---|
+| ![首屏](docs/01-overview.png) | ![结果](docs/02-screening.png) |
+
+| 个股详情（K线） | 价值型筛选 |
+|---|---|
+| ![详情](docs/03-detail.png) | ![价值](docs/04-value.png) |
+
 ---
 
 ## 一、先看效果
