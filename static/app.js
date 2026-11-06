@@ -243,10 +243,19 @@ async function runScreen() {
 function renderMeta(data) {
   const m = data.meta;
   const t = m.timings_ms;
+  const frac = m.session_frac || 1;
+  const scale = frac > 0 ? Math.round((1 / frac) * 10) / 10 : 1;
+  const adjNote = m.intraday_adjusted
+    ? ` · 盘中折算x${scale}（成交额/换手按全天预估）` : '';
+  const vrNote = m.enrich_ok === false && m.kline_strategies > 0
+    ? ' · 量比降级K线口径' : '';
   $('#metaLine').textContent =
     `全市场 ${m.total_stocks} 只 → 筛选后 ${m.universe} 只 → K线池 ${m.kline_covered} 只 → 命中 ${m.signals_hit} 只` +
-    ` · 快照 ${t.snapshot}ms / K线 ${t.kline}ms / 打分 ${t.score}ms`;
+    ` · 快照 ${t.snapshot}ms / K线 ${t.kline}ms / 补充 ${t.enrich || 0}ms / 打分 ${t.score}ms${adjNote}${vrNote}`;
   $('#universeHint').textContent = `候选 ${m.universe} 只`;
+  $('#metaLine').title = adjNote || vrNote
+    ? '盘中口径说明：成交额/换手为当日累计值，已按交易时段折算为全天预估；量比采用交易所口径（东财 f10）'
+    : '盘后口径：成交额/换手/量比均为当日完整值';
 }
 
 function renderSignalSummary(list) {

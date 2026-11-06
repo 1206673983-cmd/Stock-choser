@@ -40,6 +40,18 @@ class BaseStrategy:
 REGISTRY: dict[str, BaseStrategy] = {}
 
 
+def _vol_ratio(row: dict, m: dict) -> float | None:
+    """量比：优先快照的交易所口径（东财 f10，盘中已按时段折算），缺失时回退 K 线派生值。
+
+    K 线派生值 = 当日累计成交量 / 前 5 日完整均量，盘中会系统性偏低
+    （2026-11-05 10:10 实测 160 只池内中位仅 0.45），只应作离线兜底。
+    """
+    v = row.get("vol_ratio")
+    if v and v > 0:
+        return round(float(v), 2)
+    return m.get("vol_ratio5")
+
+
 def register(cls: type[BaseStrategy]) -> type[BaseStrategy]:
     REGISTRY[cls.key] = cls()
     return cls
@@ -62,16 +74,17 @@ class TurtleBreakout(BaseStrategy):
         level = m["close20_prev"]
         if not level or close < level * 0.998:
             return None
-        if row.get("amount", 0) < 1e8:
+        amount_est = row.get("amount_est") or row.get("amount") or 0
+        if amount_est < 1e8:
             return None
         if close < (row.get("open") or 0):
             return None
         breakout = (close / level - 1) * 100
-        vol_ratio = m.get("vol_ratio5") or 1.0
+        vol_ratio = _vol_ratio(row, m) or 1.0
         score = min(1.0, 0.55 + min(breakout, 6) * 0.05 + min(vol_ratio, 3) * 0.08)
         reasons = [
             f"突破 20 日高点 {level:.2f}（+{breakout:.1f}%）",
-            f"成交额 {row.get('amount_yi', 0):.2f} 亿",
+            f"成交额(预估) {amount_est / 1e8:.2f} 亿",
             f"量比 {vol_ratio:.2f}",
         ]
         return {"score": round(score, 3), "reasons": reasons,
@@ -94,7 +107,7 @@ class MaBullVolume(BaseStrategy):
             return None
         if not (ma5 > ma10 > ma20):
             return None
-        vr = m.get("vol_ratio5") or 0
+        vr = _vol_ratio(row, m) or 0
         if vr < 1.3:
             return None
         if (row.get("pct") or 0) <= 0:
@@ -127,7 +140,7 @@ class PullbackHold(BaseStrategy):
         dd = m.get("drawdown3") or 0
         if not (-12 <= dd <= -3):
             return None
-        vr = m.get("vol_ratio5")
+        vr = _vol_ratio(row, m)
         if vr is None or vr > 0.9:
             return None
         if not m.get("above_ma20"):
@@ -157,7 +170,7 @@ class ValueQuality(BaseStrategy):
         pe = row.get("pe") or 0
         pb = row.get("pb") or 0
         mv = row.get("mv_yi") or 0
-        to = row.get("turnover") or 0
+        to = row.get("turnover_est") or row.get("turnover") or 0
         if not (0 < pe <= 20):
             return None
         if not (0 < pb <= 2.5):
@@ -195,22 +208,23 @@ class CapitalSurge(BaseStrategy):
     weight = 1.1
 
     def evaluate(self, row: dict, m: dict, ctx: dict) -> dict | None:
-        vr = m.get("vol_ratio5")
+        vr = _vol_ratio(row, m)
         if vr is None or vr < 2:
             return None
         pct = row.get("pct") or 0
         if not (2 <= pct <= 9.5):
             return None
-        to = row.get("turnover") or 0
+        to = row.get("turnover_est") or row.get("turnover") or 0
         if not (2 <= to <= 15):
             return None
-        if (row.get("amount") or 0) < 3e8:
+        amount_est = row.get("amount_est") or row.get("amount") or 0
+        if amount_est < 3e8:
             return None
         score = min(1.0, 0.5 + min(vr - 2, 4) * 0.1 + min(to, 10) * 0.02)
         reasons = [
             f"量比 {vr:.2f} 倍",
             f"今日 {pct:+.2f}%（未封板）",
-            f"换手 {to:.2f}%，成交额 {row.get('amount_yi', 0):.2f} 亿",
+            f"换手(预估) {to:.2f}%，成交额(预估) {amount_est / 1e8:.2f} 亿",
         ]
         return {"score": round(score, 3), "reasons": reasons,
                 "metrics": {"vol_ratio5": vr, "turnover": to}}

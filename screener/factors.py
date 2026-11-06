@@ -32,8 +32,14 @@ def derive(row: dict) -> dict:
     return row
 
 
-def apply_filters(rows: Iterable[dict], f: dict) -> list[dict]:
-    """按前端传入的条件过滤。0 值表示「不限」。"""
+def apply_filters(rows: Iterable[dict], f: dict, session_frac: float = 1.0) -> list[dict]:
+    """按前端传入的条件过滤。0 值表示「不限」。
+
+    session_frac < 1（盘中）时，成交额与换手率这两个「当日累计」字段
+    按全天预估口径（值 / session_frac）比较，避免候选池随交易时间膨胀
+    （2026-11-05 实测：同一筛选条件 10:10 为 1390 只、10:55 膨胀到 1929 只）。
+    价格/涨跌幅/估值等时点值不折算。
+    """
     min_amount = float(f.get("min_amount_yi") or 0) * 1e8
     min_price = float(f.get("min_price") or 0)
     max_price = float(f.get("max_price") or 0)
@@ -47,6 +53,7 @@ def apply_filters(rows: Iterable[dict], f: dict) -> list[dict]:
     mv_min = float(f.get("mv_min_yi") or 0) * 1e8
     exclude_st = bool(f.get("exclude_st", True))
     exclude_suspended = bool(f.get("exclude_suspended", True))
+    frac = session_frac if session_frac and session_frac > 0 else 1.0
 
     out: list[dict] = []
     for row in rows:
@@ -56,6 +63,9 @@ def apply_filters(rows: Iterable[dict], f: dict) -> list[dict]:
         pb = row.get("pb") or 0
         mv = row.get("total_mv") or 0
         turnover = row.get("turnover") or 0
+        # 盘中折算：当日累计值 -> 全天预估
+        amount_eff = amount / frac
+        turnover_eff = turnover / frac
 
         if price <= 0:                       # 停牌/无报价
             continue
@@ -65,15 +75,15 @@ def apply_filters(rows: Iterable[dict], f: dict) -> list[dict]:
             continue
         if max_price and price > max_price:
             continue
-        if amount < min_amount:
+        if amount_eff < min_amount:
             continue
         if pct_min is not None and pct_min != "" and row.get("pct", 0) < float(pct_min):
             continue
         if pct_max is not None and pct_max != "" and row.get("pct", 0) > float(pct_max):
             continue
-        if to_min and turnover < to_min:
+        if to_min and turnover_eff < to_min:
             continue
-        if to_max and turnover > to_max:
+        if to_max and turnover_eff > to_max:
             continue
         if pe_max and (pe <= 0 or pe > pe_max):
             continue

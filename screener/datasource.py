@@ -20,6 +20,7 @@ import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from typing import Any, Callable
 
 from . import config
@@ -428,6 +429,10 @@ def _kline_from_tencent(code: str, market: int, bars: int) -> dict:
         prev = close
     if not klines:
         raise RuntimeError("腾讯 K 线为空")
+    if len(klines) > bars:
+        # 防御：该接口偶发无视 count 参数返回上市日起的全部历史
+        # （2026-11-05 实测 138/1306 个缓存为完整序列），统一截取尾部
+        klines = klines[-bars:]
     return _package(code, code, market, klines, "tencent")
 
 
@@ -460,6 +465,8 @@ def _kline_from_eastmoney(code: str, market: int, bars: int) -> dict:
         )
     if not klines:
         raise RuntimeError("东财 K 线为空")
+    if len(klines) > bars:
+        klines = klines[-bars:]
     return _package(code, data.get("name") or code, market, klines, "eastmoney")
 
 
@@ -508,6 +515,76 @@ def get_kline_batch(targets: list[tuple[str, int]], bars: int = config.KLINE_BAR
             if data:
                 out[code] = data
     return out
+
+
+# ------------------------------------------------------------------ 交易时段与轻量补充
+def session_fraction(now: datetime | None = None) -> float:
+    """A 股当日已交易时长占比（0~1），用于把盘中累计值折算成全天预估口径。
+
+    非交易时段（收盘后 / 开盘前 / 周末）返回 1.0，即按完整口径对待。
+    法定节假日无法离线判断：由调用方结合快照 ticktime 是否停在收盘来校正。
+    """
+    t = now or datetime.now()
+    if t.weekday() >= 5:
+        return 1.0
+    minutes = t.hour * 60 + t.minute
+    am_start, am_end = 9 * 60 + 30, 11 * 60 + 30
+    pm_start, pm_end = 13 * 60, 15 * 60
+    elapsed = 0
+    if minutes > am_start:
+        elapsed += min(minutes, am_end) - am_start
+    if minutes > pm_start:
+        elapsed += min(minutes, pm_end) - pm_start
+    if elapsed <= 0:
+        return 1.0
+    return min(1.0, max(elapsed / 240.0, 0.05))
+
+
+EM_ENRICH_BATCH = 80
+EM_ENRICH_TTL = 120
+
+
+def get_enrichment(targets: list[tuple[str, int]], force: bool = False) -> dict[str, dict]:
+    """东财 ulist 批量补充交易所口径字段：f10 量比 / f24 60日涨幅 / f115 PE(TTM)。
+
+    为什么需要它：新浪主源没有这三个字段（写死 0.0），而 K 线派生的量比
+    在盘中因当日成交量未走完而系统性偏低（2026-11-05 实测中位仅 0.45，
+    而交易所口径 f10 已按时段折算）。f24 也为后续 RPS 用全市场排名备好了数据。
+
+    失败返回空 dict，调用方回退 K 线派生值，绝不阻塞选股主流程。
+    """
+    if not targets:
+        return {}
+
+    def producer() -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for i in range(0, len(targets), EM_ENRICH_BATCH):
+            batch = targets[i : i + EM_ENRICH_BATCH]
+            secids = ",".join(f"{m}.{c}" for c, m in batch)
+            url = (
+                f"{EM_ULIST}?ut=fa5fd1943c7b386f172d6893dbfba10b&fltt=2&invt=2"
+                f"&fields=f12,f10,f24,f115&secids={secids}"
+            )
+            payload = json.loads(_http_get(url, tries=2))
+            diff = (payload.get("data") or {}).get("diff") or []
+            if isinstance(diff, dict):
+                diff = list(diff.values())
+            for item in diff:
+                code = str(item.get("f12") or "")
+                if not code:
+                    continue
+                out[code] = {
+                    "vol_ratio": _num(item.get("f10")),
+                    "pct_60d": _num(item.get("f24")),
+                    "pe_ttm": _num(item.get("f115")),
+                }
+            time.sleep(0.12)
+        return out
+
+    try:
+        return _cached("enrich", EM_ENRICH_TTL, producer, force=force)
+    except Exception:  # noqa: BLE001 - 补充源失败不阻塞主流程
+        return {}
 
 
 # ------------------------------------------------------------------ 指数 / 板块

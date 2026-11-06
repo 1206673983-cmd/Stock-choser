@@ -11,6 +11,27 @@ def _derive_all(snapshot: list[dict]) -> list[dict]:
     return [factors.derive(r) for r in snapshot]
 
 
+def _snapshot_closed(snapshot: list[dict]) -> bool:
+    """快照是否停留在收盘状态（ticktime 停在 15:00 后）。
+
+    用于识别节假日：纯时钟判断会把无交易的假日误判为盘中，导致把上一交易日的
+    全天累计值再做折算放大。快照已收盘而时钟在盘中 -> 按全天口径（frac=1.0）。
+    """
+    sample = snapshot[:500]
+    if not sample:
+        return False
+    closed = sum(1 for r in sample if str(r.get("ticktime") or "") >= "15:00")
+    return closed > len(sample) * 0.9
+
+
+def _session_frac(snapshot: list[dict]) -> float:
+    """有效交易时段占比：盘中折算 + 节假日校正。"""
+    frac = ds.session_fraction()
+    if frac < 1.0 and _snapshot_closed(snapshot):
+        return 1.0
+    return frac
+
+
 def market_overview() -> dict:
     """大盘概览：指数、涨跌家数、成交额、板块榜。"""
     snapshot = ds.get_snapshot()
@@ -73,7 +94,8 @@ def screen(params: dict[str, Any] | None = None) -> dict:
     t0 = time.time()
     snapshot = ds.get_snapshot()
     rows = _derive_all(snapshot)
-    universe = factors.apply_filters(rows, filters)
+    frac = _session_frac(snapshot)
+    universe = factors.apply_filters(rows, filters, session_frac=frac)
 
     # 需要 K 线的策略只对「成交额最大的 N 只」取数，避免打爆接口；
     # 纯快照策略（如低估值优质）则对整个候选池执行，避免漏掉池外的票。
@@ -93,6 +115,30 @@ def screen(params: dict[str, Any] | None = None) -> dict:
             code: factors.kline_metrics(kline) for code, kline in klines.items()
         }
     t2 = time.time()
+
+    # 盘中折算：给候选池各行写入「全天预估」成交额/换手，策略层门槛统一用该口径，
+    # 避免筛选层已折算而策略层仍用累计值的口径不一致。
+    for r in universe:
+        amt, to = r.get("amount") or 0, r.get("turnover") or 0
+        r["amount_est"] = amt / frac if frac < 1.0 else amt
+        r["turnover_est"] = to / frac if frac < 1.0 else to
+
+    # 东财轻量补充：交易所口径量比 / 60 日涨幅 / PE(TTM)，写回候选池各行。
+    # 量比在盘中已由交易所按时段折算，解决 K 线派生值系统性偏低的问题；
+    # 失败时静默降级，策略层回退 K 线派生值。
+    enrich = ds.get_enrichment([(r["code"], r["market"]) for r in pool])
+    if enrich:
+        for r in universe:
+            e = enrich.get(r["code"])
+            if not e:
+                continue
+            if e.get("vol_ratio", 0) > 0:
+                r["vol_ratio"] = e["vol_ratio"]
+            if e.get("pct_60d"):
+                r["pct_60d"] = e["pct_60d"]
+            if e.get("pe_ttm", 0) > 0:
+                r["pe_ttm"] = e["pe_ttm"]
+    t25 = time.time()
 
     hits: dict[str, list[dict]] = {}
     if kline_keys:
@@ -123,9 +169,14 @@ def screen(params: dict[str, Any] | None = None) -> dict:
             "strategy_count": len(active_keys),
             "kline_strategies": len(kline_keys),
             "snapshot_strategies": len(snapshot_keys),
+            "session_frac": round(frac, 3),
+            "intraday_adjusted": frac < 1.0,
+            "enrich_ok": bool(enrich),
+            "enrich_count": len(enrich),
             "timings_ms": {
                 "snapshot": int((t1 - t0) * 1000),
                 "kline": int((t2 - t1) * 1000),
+                "enrich": int((t25 - t2) * 1000),
                 "score": int((t3 - t2) * 1000),
                 "total": int((time.time() - started) * 1000),
             },
